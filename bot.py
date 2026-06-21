@@ -673,124 +673,177 @@ async def playerinfo(ctx, *, identifier):
     data = load_data()
     history_data = load_name_history()
     
-    # البحث عن اللاعب في القائمة أولاً
-    target_uuid = None
-    current_name = None
-    in_list = False
+    # target_uuids holds: uuid -> {"current_name": str, "match_reason": str}
+    target_uuids = {}
     
-    # البحث بالاسم في القائمة
-    for uuid, name in data.items():
-        if identifier.lower() == name.lower():
-            target_uuid = uuid
-            current_name = name
-            in_list = True
-            break
-    
-    # إذا لم يتم العثور في القائمة، جرب البحث في API
-    if not target_uuid:
-        # التحقق إذا كان UUID
-        if is_valid_uuid(identifier):
-            target_uuid = identifier
-            current_name = await get_username_from_uuid(target_uuid)
-        else:
-            # البحث بالاسم في API
-            target_uuid, current_name = await get_uuid_from_username(identifier)
-    
-    if not target_uuid or not current_name:
+    # التحقق إذا كان UUID مباشرة
+    if is_valid_uuid(identifier):
+        target_uuid = identifier
+        current_name = await get_username_from_uuid(target_uuid)
+        if current_name:
+            target_uuids[target_uuid] = {
+                "current_name": current_name,
+                "match_reason": "UUID_MATCH"
+            }
+    else:
+        # 1. البحث في API عن المالك الحالي للاسم
+        api_uuid, api_current_name = await get_uuid_from_username(identifier)
+        if api_uuid:
+            target_uuids[api_uuid] = {
+                "current_name": api_current_name,
+                "match_reason": "CURRENT_OWNER"
+            }
+            
+        # 2. البحث بالاسم الحالي في القائمة المحلية
+        for uuid, name in data.items():
+            if name.lower() == identifier.lower():
+                cur_name = await get_username_from_uuid(uuid)
+                if not cur_name:
+                    cur_name = name
+                target_uuids[uuid] = {
+                    "current_name": cur_name,
+                    "match_reason": "CURRENT_OWNER"
+                }
+                
+        # 3. البحث في تاريخ الأسماء
+        for uuid, history in history_data.items():
+            for change in history:
+                if change["old_name"].lower() == identifier.lower():
+                    cur_name = data.get(uuid)
+                    api_cur_name = await get_username_from_uuid(uuid)
+                    if api_cur_name:
+                        cur_name = api_cur_name
+                    elif not cur_name:
+                        cur_name = change["new_name"]
+                        
+                    # إذا لم يكن موجوداً كمالك حالي، أو كان مسجلاً بغير حالته
+                    if uuid not in target_uuids or target_uuids[uuid]["current_name"].lower() != identifier.lower():
+                        target_uuids[uuid] = {
+                            "current_name": cur_name,
+                            "match_reason": "HISTORICAL_OWNER"
+                        }
+
+    if not target_uuids:
         await ctx.send(f"❌ لم يتم العثور على اللاعب: **{identifier}**")
         return
-    
-    # 🔥 التحقق من القائمة وتحديثها أو الإضافة إليها تلقائياً
-    name_changed = False
-    original_name = None
-    name_change_info = ""
-    
-    if target_uuid in data:
-        in_list = True
-        stored_name = data.get(target_uuid)
-        if stored_name and stored_name != current_name:
-            name_changed = True
-            original_name = stored_name
-            name_change_info = f"🔄 **غير اسمه من:** `{stored_name}`\n✅ **الاسم الحالي:** `{current_name}`"
-            
-            # تحديث الاسم في القائمة
+        
+    for target_uuid, info in target_uuids.items():
+        current_name = info["current_name"]
+        match_reason = info["match_reason"]
+        
+        name_changed = False
+        original_name = None
+        name_change_info = ""
+        in_list = False
+        
+        # 🔥 التحقق من القائمة وتحديثها أو الإضافة إليها تلقائياً
+        if target_uuid in data:
+            in_list = True
+            stored_name = data.get(target_uuid)
+            if stored_name and stored_name != current_name:
+                name_changed = True
+                original_name = stored_name
+                name_change_info = f"🔄 **غير اسمه من:** `{stored_name}`\n✅ **الاسم الحالي:** `{current_name}`"
+                
+                # تحديث الاسم في القائمة
+                data[target_uuid] = current_name
+                save_data(data)
+                
+                # إضافة لتاريخ الأسماء
+                add_name_history(target_uuid, stored_name, current_name)
+                add_log_entry("NAME_UPDATE", str(ctx.author), f"{stored_name} → {current_name}", f"UUID: {target_uuid}")
+                
+                # إرسال إشعار في الشات بالتحديث كما هو مطلوب تماماً
+                await ctx.send(f"⚠️ تم تحديث اسم اللاعب في قاعدة البيانات حيث كان اسمه `{stored_name}` وتغير إلى `{current_name}`!")
+        else:
+            # اللاعب غير مضاف، نقوم بإضافته مباشرة
             data[target_uuid] = current_name
             save_data(data)
             
-            # إضافة لتاريخ الأسماء
-            add_name_history(target_uuid, stored_name, current_name)
-            add_log_entry("NAME_UPDATE", str(ctx.author), f"{stored_name} → {current_name}", f"UUID: {target_uuid}")
+            # إضافة للسجلات
+            add_log_entry("ADD", str(ctx.author), current_name, f"UUID: {target_uuid}")
+            in_list = True
             
-            # إرسال إشعار في الشات بالتحديث كما هو مطلوب تماماً
-            await ctx.send(f"⚠️ تم تحديث اسم اللاعب في قاعدة البيانات حيث كان اسمه `{stored_name}` وتغير إلى `{current_name}`!")
-    else:
-        # اللاعب غير مضاف، نقوم بإضافته مباشرة
-        data[target_uuid] = current_name
-        save_data(data)
+            # إرسال إشعار في الشات بالإضافة
+            await ctx.send(f"✅ تم إضافة اللاعب **{current_name}** الآن (لم يكن موجوداً في القائمة مسبقاً!)")
         
-        # إضافة للسجلات
-        add_log_entry("ADD", str(ctx.author), current_name, f"UUID: {target_uuid}")
-        in_list = True
+        # إرسال رسالة توضيح حالة الشخص بناءً على سبب المطابقة
+        if match_reason == "HISTORICAL_OWNER":
+            await ctx.send(f"⚠️ اللاعب الذي بحثت عنه (**{identifier}**) قام بتغيير اسمه إلى **{current_name}**!")
+        elif match_reason == "CURRENT_OWNER":
+            await ctx.send(f"🟢 اللاعب الذي بحثت عنه (**{identifier}**) هو الاسم الحالي للاعب **{current_name}**!")
+            
+        # إنشاء الـ Embed المنسق بشكل احترافي ومميز
+        embed = discord.Embed(
+            title=f"🔍 معلومات اللاعب: {current_name}",
+            color=BotColor.WARNING if match_reason == "HISTORICAL_OWNER" or name_changed else BotColor.INFO
+        )
         
-        # إرسال إشعار في الشات بالإضافة
-        await ctx.send(f"✅ تم إضافة اللاعب **{current_name}** الآن (لم يكن موجوداً في القائمة مسبقاً!)")
-    
-    # إنشاء الـ Embed المنسق بشكل احترافي ومميز
-    embed = discord.Embed(
-        title=f"🔍 معلومات اللاعب: {current_name}",
-        color=BotColor.WARNING if name_changed else BotColor.INFO
-    )
-    
-    # جلب صورة رأس وجسم اللاعب ثلاثية الأبعاد
-    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_uuid}/100.png")
-    embed.set_image(url=f"https://mc-heads.net/body/{target_uuid}/right/150.png")
-    
-    embed.add_field(name="🆔 UUID", value=f"`{target_uuid}`", inline=False)
-    embed.add_field(name="📛 الاسم الحالي", value=f"**{current_name}**", inline=True)
-    
-    # حالة القائمة
-    if in_list:
+        # جلب صورة رأس وجسم اللاعب ثلاثية الأبعاد
+        embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_uuid}/100.png")
+        embed.set_image(url=f"https://mc-heads.net/body/{target_uuid}/right/150.png")
+        
+        embed.add_field(name="🆔 UUID", value=f"`{target_uuid}`", inline=False)
+        embed.add_field(name="📛 الاسم الحالي", value=f"**{current_name}**", inline=True)
+        
+        # حالة القائمة
         status = "🟢 مضاف للقائمة"
         if name_changed:
             status += " (تم تحديث الاسم)"
-    else:
-        status = "🔴 غير مضاف"
-    embed.add_field(name="📋 حالة القائمة", value=status, inline=True)
-    
-    # 🔥 عرض معلومات تغيير الاسم إذا حصل
-    if name_changed:
-        embed.add_field(name="🔄 تغيير الاسم الأخير", value=name_change_info, inline=False)
-    
-    # 🔥 عرض تاريخ الأسماء المحفوظ لدينا بالكامل
-    if target_uuid in history_data and history_data[target_uuid]:
-        name_history = history_data[target_uuid]
-        history_text = ""
-        for change in reversed(name_history):
-            line = f"📅 `{change['timestamp']}` | `{change['old_name']}` ➔ `{change['new_name']}`\n"
-            if len(history_text) + len(line) < 1000:
-                history_text += line
-            else:
-                history_text += f"... و {len(name_history) - len(history_text.splitlines())} تغييرات أخرى"
-                break
+        embed.add_field(name="📋 حالة القائمة", value=status, inline=True)
         
+        # توضيح حالة الشخص في البحث
+        if match_reason == "HISTORICAL_OWNER":
+            embed.add_field(
+                name="🔄 حالة الاسم المستعلم عنه", 
+                value=f"كان اسمه سابقاً `{identifier}` وغيره إلى الاسم الحالي `{current_name}`.", 
+                inline=False
+            )
+        elif match_reason == "CURRENT_OWNER":
+            embed.add_field(
+                name="🟢 حالة الاسم المستعلم عنه", 
+                value=f"يمتلك الاسم `{identifier}` حالياً.", 
+                inline=False
+            )
+        
+        # 🔥 عرض معلومات تغيير الاسم إذا حصل
+        if name_changed:
+            embed.add_field(name="🔄 تغيير الاسم الأخير في القاعدة", value=name_change_info, inline=False)
+        
+        # 🔥 عرض تاريخ الأسماء المحفوظ لدينا بالكامل
+        # إعادة تحميل history_data لضمان قراءة التحديثات الأخيرة إذا تمت إضافتها في هذه الدورة
+        current_history = load_name_history()
+        if target_uuid in current_history and current_history[target_uuid]:
+            name_history = current_history[target_uuid]
+            history_text = ""
+            for change in reversed(name_history):
+                line = f"📅 `{change['timestamp']}` | `{change['old_name']}` ➔ `{change['new_name']}`\n"
+                if len(history_text) + len(line) < 1000:
+                    history_text += line
+                else:
+                    history_text += f"... و {len(name_history) - len(history_text.splitlines())} تغييرات أخرى"
+                    break
+            
+            embed.add_field(
+                name=f"🕒 تاريخ التغييرات المسجلة بالكامل ({len(name_history)} تغيير)",
+                value=history_text,
+                inline=False
+            )
+        
+        # معلومات إضافية
         embed.add_field(
-            name=f"🕒 تاريخ التغييرات المسجلة بالكامل ({len(name_history)} تغيير)",
-            value=history_text,
+            name="💾 مصدر البيانات", 
+            value="🌐 Mojang API & Fallbacks + 💾 قاعدة البيانات المحلية", 
             inline=False
         )
-    
-    # معلومات إضافية
-    embed.add_field(
-        name="💾 مصدر البيانات", 
-        value="🌐 Mojang API & Fallbacks + 💾 قاعدة البيانات المحلية", 
-        inline=False
-    )
-    
-    # إضافة تذييل احترافي مع رمز أفاتار البوت وبدون أي حقوق للمطور
-    bot_avatar_url = bot.user.display_avatar.url if bot.user else None
-    embed.set_footer(text="NameHistory Bot • تم الاستعلام بنجاح", icon_url=bot_avatar_url)
-    
-    await ctx.send(embed=embed)
+        
+        # إضافة تذييل احترافي مع رمز أفاتار البوت وبدون أي حقوق للمطور
+        bot_avatar_url = bot.user.display_avatar.url if bot.user else None
+        embed.set_footer(text="NameHistory Bot • تم الاستعلام بنجاح", icon_url=bot_avatar_url)
+        
+        await ctx.send(embed=embed)
+        # تأخير بسيط لتجنب حد التقييد في ديسكورد إذا كان هناك أكثر من لاعب
+        await asyncio.sleep(0.5)
 
 @bot.command()
 async def namehistory(ctx, *, identifier):
@@ -1134,5 +1187,5 @@ async def help(ctx):
     
     await ctx.send(embed=embed)
 
-# تشغيل البوت
+# تشغيل البوتتشغيل البوت
 bot.run("YOUR TOKEN HERE!")
