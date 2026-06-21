@@ -12,6 +12,17 @@ import uuid as uuid_lib
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.help_command = None
+
+# الألوان الثيمية المتميزة للبوت
+class BotColor:
+    SUCCESS = discord.Color(0x2ecc71)  # أخضر نجاح
+    WARNING = discord.Color(0xe67e22)  # برتقالي تحذير/تحديث
+    DANGER = discord.Color(0xe74c3c)   # أحمر خطأ/حذف
+    INFO = discord.Color(0x3498db)     # أزرق معلومات
+    PRIMARY = discord.Color(0x9b59b6)  # بنفسجي رئيسي
+    GOLD = discord.Color(0xf1c40f)     # ذهبي إحصائيات
+
 
 # ملفات البيانات
 DATA_FILE = "players.json"
@@ -116,19 +127,10 @@ class PaginationView(ui.View):
         self.current_page = 0
         self.show_extreme_buttons = show_extreme_buttons
         
-        # إزالة الأزرار الموجودة أولاً
-        self.clear_items()
-        
-        # إضافة الأزرار بناءً على الإعدادات
-        if self.show_extreme_buttons:
-            self.add_item(self.first_button)
-        
-        self.add_item(self.previous_button)
-        self.add_item(self.page_label)
-        self.add_item(self.next_button)
-        
-        if self.show_extreme_buttons:
-            self.add_item(self.last_button)
+        # إزالة الأزرار الطرفية إن لم نكن بحاجة لها بدلاً من مسح وإعادة إضافة الكل
+        if not self.show_extreme_buttons:
+            self.remove_item(self.first_button)
+            self.remove_item(self.last_button)
         
         self.update_buttons()
     
@@ -152,14 +154,14 @@ class PaginationView(ui.View):
         if self.current_page > 0:
             self.current_page = 0
             self.update_buttons()
-            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
     
     @ui.button(emoji="⬅️", style=ButtonStyle.gray, row=0)
     async def previous_button(self, interaction: discord.Interaction, button: ui.Button):
         if self.current_page > 0:
             self.current_page -= 1
             self.update_buttons()
-            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
     
     @ui.button(label="الصفحة 1/1", style=ButtonStyle.blurple, row=0, disabled=True)
     async def page_label(self, interaction: discord.Interaction, button: ui.Button):
@@ -170,14 +172,14 @@ class PaginationView(ui.View):
         if self.current_page < len(self.embeds) - 1:
             self.current_page += 1
             self.update_buttons()
-            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
     
     @ui.button(emoji="⏩", style=ButtonStyle.green, row=0)
     async def last_button(self, interaction: discord.Interaction, button: ui.Button):
         if self.current_page < len(self.embeds) - 1:
             self.current_page = len(self.embeds) - 1
             self.update_buttons()
-            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 def create_paginated_embeds(items, title, items_per_page=20, color=discord.Color.blue()):
     """إنشاء إيمبدز مقسمة إلى صفحات"""
@@ -202,31 +204,95 @@ def create_paginated_embeds(items, title, items_per_page=20, color=discord.Color
 
 async def get_uuid_from_username(username):
     """جلب UUID من اسم اللاعب"""
+    # 1. محاولة خادم Mojang الرسمي
     try:
         url = f"https://api.mojang.com/users/profiles/minecraft/{username}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=5) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data["id"], data["name"]
-                return None, None
+                elif response.status == 404:
+                    return None, None
     except Exception as e:
-        print(f"❌ خطأ في جلب UUID لـ {username}: {e}")
-        return None, None
+        print(f"⚠️ فشل Mojang في العثور على UUID لـ {username}: {e}. جاري محاولة الخوادم البديلة...")
+
+    # 2. محاولة خادم PlayerDB كبديل أول
+    try:
+        url = f"https://playerdb.co/api/player/minecraft/{username}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("success"):
+                        player = data["data"]["player"]
+                        return player.get("raw_id") or player.get("id"), player.get("username")
+                elif response.status == 404:
+                    return None, None
+    except Exception as e:
+        print(f"⚠️ فشل PlayerDB في جلب UUID لـ {username}: {e}")
+
+    # 3. محاولة خادم Ashcon كبديل ثانٍ
+    try:
+        url = f"https://api.ashcon.app/mojang/v2/user/{username}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    uuid = data.get("uuid")
+                    if uuid:
+                        uuid = uuid.replace("-", "")
+                    return uuid, data.get("username")
+                elif response.status == 404:
+                    return None, None
+    except Exception as e:
+        print(f"⚠️ فشل Ashcon في جلب UUID لـ {username}: {e}")
+
+    return None, None
 
 async def get_username_from_uuid(uuid):
     """جلب الاسم الحالي من UUID"""
+    # 1. محاولة خادم Mojang الرسمي
     try:
         url = f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=5) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data["name"]
-                return None
+                elif response.status in (204, 404):
+                    return None
     except Exception as e:
-        print(f"❌ خطأ في جلب الاسم لـ {uuid}: {e}")
-        return None
+        print(f"⚠️ فشل Mojang في جلب اسم لـ {uuid}: {e}. جاري محاولة الخوادم البديلة...")
+
+    # 2. محاولة خادم PlayerDB كبديل أول
+    try:
+        url = f"https://playerdb.co/api/player/minecraft/{uuid}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("success"):
+                        return data["data"]["player"]["username"]
+                elif response.status == 404:
+                    return None
+    except Exception as e:
+        print(f"⚠️ فشل PlayerDB في جلب اسم لـ {uuid}: {e}")
+
+    # 3. محاولة خادم Ashcon كبديل ثانٍ
+    try:
+        url = f"https://api.ashcon.app/mojang/v2/user/{uuid}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("username")
+                elif response.status == 404:
+                    return None
+    except Exception as e:
+        print(f"⚠️ فشل Ashcon في جلب اسم لـ {uuid}: {e}")
+
+    return None
 
 def is_valid_uuid(uuid):
     """التحقق من صحة UUID"""
@@ -634,12 +700,13 @@ async def playerinfo(ctx, *, identifier):
         await ctx.send(f"❌ لم يتم العثور على اللاعب: **{identifier}**")
         return
     
-    # 🔥 الجزء الجديد: التحقق من تغيير الاسم إذا كان في القائمة
+    # 🔥 التحقق من القائمة وتحديثها أو الإضافة إليها تلقائياً
     name_changed = False
     original_name = None
     name_change_info = ""
     
-    if in_list:
+    if target_uuid in data:
+        in_list = True
         stored_name = data.get(target_uuid)
         if stored_name and stored_name != current_name:
             name_changed = True
@@ -652,40 +719,62 @@ async def playerinfo(ctx, *, identifier):
             
             # إضافة لتاريخ الأسماء
             add_name_history(target_uuid, stored_name, current_name)
-            add_log_entry("NAME_CHANGE", "SYSTEM", f"{stored_name} → {current_name}", f"UUID: {target_uuid}")
+            add_log_entry("NAME_UPDATE", str(ctx.author), f"{stored_name} → {current_name}", f"UUID: {target_uuid}")
+            
+            # إرسال إشعار في الشات بالتحديث كما هو مطلوب تماماً
+            await ctx.send(f"⚠️ تم تحديث اسم اللاعب في قاعدة البيانات حيث كان اسمه `{stored_name}` وتغير إلى `{current_name}`!")
+    else:
+        # اللاعب غير مضاف، نقوم بإضافته مباشرة
+        data[target_uuid] = current_name
+        save_data(data)
+        
+        # إضافة للسجلات
+        add_log_entry("ADD", str(ctx.author), current_name, f"UUID: {target_uuid}")
+        in_list = True
+        
+        # إرسال إشعار في الشات بالإضافة
+        await ctx.send(f"✅ تم إضافة اللاعب **{current_name}** الآن (لم يكن موجوداً في القائمة مسبقاً!)")
     
-    # إنشاء الـ Embed
+    # إنشاء الـ Embed المنسق بشكل احترافي ومميز
     embed = discord.Embed(
         title=f"🔍 معلومات اللاعب: {current_name}",
-        color=discord.Color.blue()
+        color=BotColor.WARNING if name_changed else BotColor.INFO
     )
     
+    # جلب صورة رأس وجسم اللاعب ثلاثية الأبعاد
+    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_uuid}/100.png")
+    embed.set_image(url=f"https://mc-heads.net/body/{target_uuid}/right/150.png")
+    
     embed.add_field(name="🆔 UUID", value=f"`{target_uuid}`", inline=False)
-    embed.add_field(name="📛 الاسم الحالي", value=current_name, inline=True)
+    embed.add_field(name="📛 الاسم الحالي", value=f"**{current_name}**", inline=True)
     
     # حالة القائمة
     if in_list:
-        status = "✅ مضاف للقائمة"
+        status = "🟢 مضاف للقائمة"
         if name_changed:
             status += " (تم تحديث الاسم)"
     else:
-        status = "❌ غير مضاف"
+        status = "🔴 غير مضاف"
     embed.add_field(name="📋 حالة القائمة", value=status, inline=True)
     
     # 🔥 عرض معلومات تغيير الاسم إذا حصل
     if name_changed:
-        embed.add_field(name="🔄 تغيير الاسم", value=name_change_info, inline=False)
-        embed.color = discord.Color.orange()  # تغيير اللون للإشارة للتغيير
+        embed.add_field(name="🔄 تغيير الاسم الأخير", value=name_change_info, inline=False)
     
-    # 🔥 عرض تاريخ الأسماء المحفوظ لدينا
+    # 🔥 عرض تاريخ الأسماء المحفوظ لدينا بالكامل
     if target_uuid in history_data and history_data[target_uuid]:
-        name_history = history_data[target_uuid][-5:]  # آخر 5 تغييرات
+        name_history = history_data[target_uuid]
         history_text = ""
         for change in reversed(name_history):
-            history_text += f"`{change['old_name']}` → `{change['new_name']}`\n"
+            line = f"📅 `{change['timestamp']}` | `{change['old_name']}` ➔ `{change['new_name']}`\n"
+            if len(history_text) + len(line) < 1000:
+                history_text += line
+            else:
+                history_text += f"... و {len(name_history) - len(history_text.splitlines())} تغييرات أخرى"
+                break
         
         embed.add_field(
-            name=f"🕒 تاريخ الأسماء ({len(name_history)} تغيير)",
+            name=f"🕒 تاريخ التغييرات المسجلة بالكامل ({len(name_history)} تغيير)",
             value=history_text,
             inline=False
         )
@@ -693,9 +782,13 @@ async def playerinfo(ctx, *, identifier):
     # معلومات إضافية
     embed.add_field(
         name="💾 مصدر البيانات", 
-        value="Mojang API + قاعدة البيانات المحلية", 
+        value="🌐 Mojang API & Fallbacks + 💾 قاعدة البيانات المحلية", 
         inline=False
     )
+    
+    # إضافة تذييل احترافي مع رمز أفاتار البوت وبدون أي حقوق للمطور
+    bot_avatar_url = bot.user.display_avatar.url if bot.user else None
+    embed.set_footer(text="NameHistory Bot • تم الاستعلام بنجاح", icon_url=bot_avatar_url)
     
     await ctx.send(embed=embed)
 
@@ -999,35 +1092,47 @@ async def logsearch(ctx, *, search_term):
         await ctx.send(embed=pages[0], view=view)
 
 @bot.command()
-async def clearlog(ctx):
-    """مسح سجل التغييرات"""
-    log_data = load_log()
-    
-    if not log_data:
-        await ctx.send("📋 السجل فارغ بالفعل")
-        return
-    
-    # تأكيد المسح
-    confirm_msg = await ctx.send(
-        f"⚠️ هل تريد مسح **{len(log_data)}** سجل؟\n"
-        f"تفاعل بـ ✅ للتأكيد أو ❌ للإلغاء"
+async def help(ctx):
+    """عرض قائمة المساعدة للبوت بشكل منسق وجذاب"""
+    embed = discord.Embed(
+        title="🎮 قائمة مساعدة NameHistory Bot",
+        description="مرحباً بك! هذا البوت مخصص لمراقبة وتحديث تغييرات أسماء لاعبي ماينكرافت وتوثيقها بشكل كامل.",
+        color=BotColor.PRIMARY
     )
-    await confirm_msg.add_reaction("✅")
-    await confirm_msg.add_reaction("❌")
     
-    def check(reaction, user):
-        return user == ctx.author and str(reaction.emoji) in ["✅", "❌"]
+    # جلب أفاتار البوت
+    bot_avatar_url = bot.user.display_avatar.url if bot.user else None
+    if bot_avatar_url:
+        embed.set_thumbnail(url=bot_avatar_url)
+        
+    embed.add_field(
+        name="🎮 إدارة وقائمة اللاعبين",
+        value=(
+            "• `!addplayer <Name/UUID>` - إضافة لاعب جديد بالاسم أو الـ UUID مباشرة.\n"
+            "• `!addplayers <Name1,Name2,...>` - إضافة عدة لاعبين دفعة واحدة.\n"
+            "• `!playerinfo <Name/UUID>` - عرض تفاصيل اللاعب والتحقق من اسمه الحالي وتحديثه وتاريخه.\n"
+            "• `!playerlist` - فحص الأسماء لجميع اللاعبين وعرض القائمة مقسمة لصفحات.\n"
+            "• `!showlist [page]` - عرض صفحة محددة من قائمة اللاعبين المسجلين.\n"
+            "• `!findplayer <Term>` - البحث عن لاعب معين داخل قاعدة البيانات المحلية."
+        ),
+        inline=False
+    )
     
-    try:
-        reaction, user = await bot.wait_for('reaction_add', timeout=30.0, check=check)
-        if str(reaction.emoji) == "✅":
-            # حفظ سجل فارغ
-            save_log([])
-            await confirm_msg.edit(content="✅ تم مسح سجل التغييرات بالكامل")
-        else:
-            await confirm_msg.edit(content="❌ تم الإلغاء")
-    except asyncio.TimeoutError:
-        await confirm_msg.edit(content="❌ انتهى وقت الانتظار")
+    embed.add_field(
+        name="📊 الفحص والسجلات والنظام",
+        value=(
+            "• `!checknames` - بدء فحص وتحديث شامل لأسماء جميع اللاعبين المسجلين وعرض التقرير.\n"
+            "• `!namehistory <Name/UUID>` - عرض تاريخ التغييرات الكامل المسجل للاعب معين.\n"
+            "• `!log [count]` - عرض سجل العمليات والتغييرات الأخيرة بشكل مقسم لصفحات.\n"
+            "• `!logsearch <Query>` - البحث عن عملية معينة في السجل بالاسم، الإجراء، أو التاريخ.\n"
+            "• `!listinfo` - عرض إحصائيات عامة حول أعداد اللاعبين المسجلين."
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="استخدم علامة (!) قبل أي أمر لتنفيذه", icon_url=bot_avatar_url)
+    
+    await ctx.send(embed=embed)
 
 # تشغيل البوت
 bot.run("YOUR TOKEN HERE!")
